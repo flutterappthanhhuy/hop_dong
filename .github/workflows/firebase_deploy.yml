@@ -2,7 +2,7 @@ name: Deploy Flutter Web to Firebase Hosting
 
 on:
   push:
-    branches: [ "main" ]   # mỗi lần push lên nhánh main thì sẽ auto deploy
+    branches: [ "main" ]
 
 jobs:
   build_and_deploy:
@@ -25,7 +25,7 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
-         working-directory: ./hop_dong
+        working-directory: ./hop_dong
 
       - name: Build Flutter Web (no PWA cache)
         run: flutter build web --release --pwa-strategy=none
@@ -37,6 +37,6 @@ jobs:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           channelId: live
-          projectId: thanhhuy123-4e01c   # Đúng projectId của bạn
+          projectId: thanhhuy123-4e01c
         env:
           FIREBASE_CLI_EXPERIMENTS: webframeworks
