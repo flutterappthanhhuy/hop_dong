@@ -25,6 +25,7 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
+         working-directory: ./hop_dong
 
       - name: Build Flutter Web (no PWA cache)
         run: flutter build web --release --pwa-strategy=none
