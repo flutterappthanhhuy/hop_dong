@@ -29,6 +29,7 @@ jobs:
 
       - name: Build Flutter Web (no PWA cache)
         run: flutter build web --release --pwa-strategy=none
+        working-directory: ./hop_dong
 
       - name: Deploy to Firebase Hosting (live)
         uses: FirebaseExtended/action-hosting-deploy@v0
