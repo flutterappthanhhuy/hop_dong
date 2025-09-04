@@ -1,0 +1,40 @@
+name: Deploy Flutter Web to Firebase Hosting
+
+on:
+  push:
+    branches: [ "main" ]   # mỗi lần push lên nhánh main thì sẽ auto deploy
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java (for Flutter)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build Flutter Web (no PWA cache)
+        run: flutter build web --release --pwa-strategy=none
+
+      - name: Deploy to Firebase Hosting (live)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: thanhhuy123-4e01c   # Đúng projectId của bạn
+        env:
+          FIREBASE_CLI_EXPERIMENTS: webframeworks
