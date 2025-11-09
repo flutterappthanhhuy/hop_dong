@@ -4,7 +4,38 @@
 #property strict
 
 #include <Trade\Trade.mqh>
-#include <Calendar\Calendar.mqh>
+
+#ifndef __CALENDAR_DEFINITIONS__
+#define __CALENDAR_DEFINITIONS__
+enum ENUM_CALENDAR_IMPORTANCE
+  {
+   CALENDAR_IMPORTANCE_LOW    = 0,
+   CALENDAR_IMPORTANCE_MEDIUM = 1,
+   CALENDAR_IMPORTANCE_HIGH   = 2,
+   CALENDAR_IMPORTANCE_HOLIDAY= 3
+  };
+
+struct MqlCalendarValue
+  {
+   int      event_id;
+   datetime time;
+   double   actual_value;
+   double   previous_value;
+   double   forecast_value;
+   double   revised_value;
+   int      impact;
+  };
+
+struct MqlCalendarEvent
+  {
+   int                      id;
+   datetime                 time;
+   string                   country;
+   string                   currency;
+   string                   title;
+   ENUM_CALENDAR_IMPORTANCE importance;
+  };
+#endif
 
 enum OscillatorMode
   {
