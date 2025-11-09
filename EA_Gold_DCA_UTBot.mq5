@@ -4,6 +4,7 @@
 #property strict
 
 #include <Trade\Trade.mqh>
+#include <Calendar\Calendar.mqh>
 
 enum OscillatorMode
   {
@@ -24,6 +25,11 @@ input ENUM_TIMEFRAMES InpSignalTF                   = PERIOD_M15;
 input int             InpFastEMA                    = 34;
 input int             InpSlowEMA                    = 89;
 
+input bool            InpUseTrendFilter             = true;
+input ENUM_TIMEFRAMES InpTrendTF                    = PERIOD_H1;
+input int             InpTrendFastEMA               = 55;
+input int             InpTrendSlowEMA               = 144;
+
 input bool            InpUseOscillatorFilter        = true;
 input OscillatorMode  InpOscillatorMode             = OSC_RSI;
 input int             InpRSIPeriod                  = 14;
@@ -42,6 +48,15 @@ input double          InpBasketQuickCloseUSD        = 1.0;
 input bool            InpEnableHedging              = true;
 input double          InpHedgeMarginLevel           = 140.0;
 input uint            InpHedgeCooldownMinutes       = 15;
+
+input bool                    InpUseNewsFilter      = true;
+input ENUM_CALENDAR_IMPORTANCE InpNewsMinImpact     = CALENDAR_IMPORTANCE_HIGH;
+input uint                    InpNewsMinutesBefore  = 30;
+input uint                    InpNewsMinutesAfter   = 30;
+input bool                    InpNewsBlockBuys      = true;
+input bool                    InpNewsBlockSells     = true;
+input bool                    InpAllowDcaDuringNews = false;
+input bool                    InpAllowHedgeDuringNews = true;
 
 //--- constants & globals
 const int             DIR_BUY                       = 1;
@@ -65,14 +80,20 @@ int                   g_handleEMAfast               = INVALID_HANDLE;
 int                   g_handleEMAslow               = INVALID_HANDLE;
 int                   g_handleRSI                   = INVALID_HANDLE;
 int                   g_handleCCI                   = INVALID_HANDLE;
+int                   g_handleTrendEMAfast          = INVALID_HANDLE;
+int                   g_handleTrendEMAslow          = INVALID_HANDLE;
 
 double                g_trailingLockUsd             = 0.0;
+string                g_symbolBase                  = "";
+string                g_symbolQuote                 = "";
+bool                  g_calendarReady               = false;
 
 //--- function declarations
 bool     IsSymbolReady();
 bool     IsNewBar();
 int      UpdateUTBotSignal();
 bool     CheckFilters(const int direction);
+bool     CheckTrendFilter(const int direction);
 bool     GetOscillatorValue(double &value);
 double   NormalizeLots(double lots);
 bool     OpenNewPosition(const int direction,const double lots);
@@ -89,11 +110,30 @@ void     TrailGroup(const int direction,const double basketProfit);
 double   PriceFromUSD(const double usd,const double volume);
 void     HedgeIfNeeded(const int direction);
 double   NormalizePrice(const double price);
+bool     IsNewsFilterBlocking(const int direction);
+void     InitializeSymbolCurrencies();
 
 int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippage);
+
+   InitializeSymbolCurrencies();
+
+   if(InpUseNewsFilter)
+     {
+      g_calendarReady = CalendarIsSynchronized();
+      if(!g_calendarReady)
+        {
+         datetime nowTime = TimeCurrent();
+         if(!CalendarSelect(nowTime - 86400, nowTime + 86400))
+            Print("Warning: Failed to pre-load calendar data. News filter will wait for synchronization.");
+         else
+            g_calendarReady = CalendarIsSynchronized();
+        }
+      if(!g_calendarReady)
+         Print("Economic calendar not yet synchronized; news filter will be inactive until data arrives.");
+     }
 
    if(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_MODE)==SYMBOL_TRADE_MODE_DISABLED)
      {
@@ -125,6 +165,22 @@ int OnInit()
      {
       Print("Failed to create EMA handles. Error: ",GetLastError());
       return(INIT_FAILED);
+     }
+
+   if(InpUseTrendFilter)
+     {
+      g_handleTrendEMAfast = iMA(_Symbol,InpTrendTF,InpTrendFastEMA,0,MODE_EMA,PRICE_CLOSE);
+      g_handleTrendEMAslow = iMA(_Symbol,InpTrendTF,InpTrendSlowEMA,0,MODE_EMA,PRICE_CLOSE);
+      if(g_handleTrendEMAfast == INVALID_HANDLE || g_handleTrendEMAslow == INVALID_HANDLE)
+        {
+         Print("Failed to create trend EMA handles. Trend confirmation will be skipped. Error: ",GetLastError());
+         if(g_handleTrendEMAfast != INVALID_HANDLE)
+            IndicatorRelease(g_handleTrendEMAfast);
+         if(g_handleTrendEMAslow != INVALID_HANDLE)
+            IndicatorRelease(g_handleTrendEMAslow);
+         g_handleTrendEMAfast = INVALID_HANDLE;
+         g_handleTrendEMAslow = INVALID_HANDLE;
+        }
      }
 
    if(InpUseOscillatorFilter)
@@ -164,6 +220,10 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_handleRSI);
    if(g_handleCCI != INVALID_HANDLE)
       IndicatorRelease(g_handleCCI);
+   if(g_handleTrendEMAfast != INVALID_HANDLE)
+      IndicatorRelease(g_handleTrendEMAfast);
+   if(g_handleTrendEMAslow != INVALID_HANDLE)
+      IndicatorRelease(g_handleTrendEMAslow);
   }
 
 void OnTick()
@@ -180,13 +240,21 @@ void OnTick()
      {
       int signal = UpdateUTBotSignal();
       if(signal != 0 && CheckFilters(signal))
-         g_pendingDirection = signal;
+        {
+         if(IsNewsFilterBlocking(signal))
+            Print("News filter active. Skipping new signal entry.");
+         else
+            g_pendingDirection = signal;
+        }
      }
 
    ManageGroups();
 
    if(g_pendingDirection != 0)
      {
+      if(IsNewsFilterBlocking(g_pendingDirection))
+         return;
+
       if(CountPositions(g_pendingDirection) == 0)
         {
          double lot = NormalizeLots(InpInitialLot);
@@ -305,6 +373,9 @@ bool CheckFilters(const int direction)
    if(direction == DIR_SELL && fast >= slow)
       return(false);
 
+   if(!CheckTrendFilter(direction))
+      return(false);
+
    if(InpUseOscillatorFilter)
      {
       double oscValue = 0.0;
@@ -327,6 +398,31 @@ bool CheckFilters(const int direction)
         }
      }
    return(true);
+  }
+
+bool CheckTrendFilter(const int direction)
+  {
+   if(!InpUseTrendFilter)
+      return(true);
+
+   if(g_handleTrendEMAfast == INVALID_HANDLE || g_handleTrendEMAslow == INVALID_HANDLE)
+      return(true);
+
+   double emaFast[1];
+   double emaSlow[1];
+
+   if(CopyBuffer(g_handleTrendEMAfast,0,0,1,emaFast) < 1)
+      return(true);
+   if(CopyBuffer(g_handleTrendEMAslow,0,0,1,emaSlow) < 1)
+      return(true);
+
+   double fast = emaFast[0];
+   double slow = emaSlow[0];
+
+   if(direction == DIR_BUY)
+      return(fast > slow);
+
+   return(fast < slow);
   }
 
 bool GetOscillatorValue(double &value)
@@ -524,6 +620,9 @@ void ManageGroup(const int direction)
 
 void ManageDCA(const int direction,const double basketProfit)
   {
+   if(IsNewsFilterBlocking(direction) && !InpAllowDcaDuringNews)
+      return;
+
    if(basketProfit >= 0.0)
       return;
 
@@ -693,6 +792,9 @@ void HedgeIfNeeded(const int direction)
    if(lastHedgeTime != 0 && (nowTime - lastHedgeTime) < (int)InpHedgeCooldownMinutes * 60)
       return;
 
+   if(!InpAllowHedgeDuringNews && IsNewsFilterBlocking(-direction))
+      return;
+
    double groupVolume = GetTotalVolume(direction);
    double oppositeVolume = GetTotalVolume(-direction);
    double hedgeVolume = groupVolume - oppositeVolume;
@@ -716,4 +818,82 @@ double NormalizePrice(const double price)
   {
    int digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
    return(NormalizeDouble(price,digits));
+  }
+
+bool IsNewsFilterBlocking(const int direction)
+  {
+   if(!InpUseNewsFilter)
+      return(false);
+
+   if(direction == DIR_BUY && !InpNewsBlockBuys)
+      return(false);
+   if(direction == DIR_SELL && !InpNewsBlockSells)
+      return(false);
+
+   if(!g_calendarReady)
+      g_calendarReady = CalendarIsSynchronized();
+   if(!g_calendarReady)
+      return(false);
+
+   datetime nowTime = TimeCurrent();
+   datetime fromTime = nowTime - (long)InpNewsMinutesBefore * 60;
+   datetime toTime = nowTime + (long)InpNewsMinutesAfter * 60;
+
+   MqlCalendarValue values[];
+   int events = CalendarValueHistory(values,fromTime,toTime);
+   if(events <= 0)
+      return(false);
+
+   string baseCurrency = g_symbolBase;
+   string quoteCurrency = g_symbolQuote;
+
+   for(int i=0; i<events; ++i)
+     {
+      MqlCalendarEvent calendarEvent;
+      if(!CalendarEventById(calendarEvent,values[i].event_id))
+         continue;
+
+      if(calendarEvent.importance < InpNewsMinImpact)
+         continue;
+
+      string eventCurrency = StringToUpper(calendarEvent.currency);
+      if(eventCurrency != baseCurrency && eventCurrency != quoteCurrency && eventCurrency != "ALL")
+         continue;
+
+      datetime eventTime = calendarEvent.time;
+      if(eventTime == 0)
+         eventTime = values[i].time;
+      if(eventTime == 0)
+         continue;
+
+      long diff = (long)MathAbs((double)(nowTime - eventTime));
+
+      if(eventTime <= nowTime)
+        {
+         if(diff <= (long)InpNewsMinutesAfter * 60)
+            return(true);
+        }
+      else
+        {
+         if(diff <= (long)InpNewsMinutesBefore * 60)
+            return(true);
+        }
+     }
+   return(false);
+  }
+
+void InitializeSymbolCurrencies()
+  {
+   string currencyBase = "";
+   string currencyProfit = "";
+
+   if(SymbolInfoString(_Symbol,SYMBOL_CURRENCY_BASE,currencyBase))
+      g_symbolBase = StringToUpper(currencyBase);
+   else
+      g_symbolBase = "";
+
+   if(SymbolInfoString(_Symbol,SYMBOL_CURRENCY_PROFIT,currencyProfit))
+      g_symbolQuote = StringToUpper(currencyProfit);
+   else
+      g_symbolQuote = "";
   }
